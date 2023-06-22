@@ -17,6 +17,15 @@ type Resource struct {
 
 	Provider ProviderRef `json:"provider"`
 
+	// All resolved input values to this resource (as <res-input-name>: <value-ref>).
+	// resource "res" {
+	//	input-name = value-ref (i.e. var.variable_ref, module.mod.out_ref, other_res.attr)
+	// }
+	Inputs map[string]AttributeReference `json:"inputs"`
+
+	// All references to this resource's attributes by other resoures.
+	References map[string][]AttributeReference `json:"references"`
+
 	Pos SourcePos `json:"pos"`
 }
 

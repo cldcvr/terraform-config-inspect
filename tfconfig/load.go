@@ -13,13 +13,13 @@ import (
 
 // LoadModule reads the directory at the given path and attempts to interpret
 // it as a Terraform module.
-func LoadModule(dir string) (*Module, Diagnostics) {
-	return LoadModuleFromFilesystem(NewOsFs(), dir)
+func LoadModule(dir string, resolvedModuleRefs *ResolvedModulesSchema) (*Module, Diagnostics) {
+	return LoadModuleFromFilesystem(NewOsFs(), dir, resolvedModuleRefs)
 }
 
 // LoadModuleFromFilesystem reads the directory at the given path
 // in the given FS and attempts to interpret it as a Terraform module
-func LoadModuleFromFilesystem(fs FS, dir string) (*Module, Diagnostics) {
+func LoadModuleFromFilesystem(fs FS, dir string, resolvedModuleRefs *ResolvedModulesSchema) (*Module, Diagnostics) {
 	// For broad compatibility here we actually have two separate loader
 	// codepaths. The main one uses the new HCL parser and API and is intended
 	// for configurations from Terraform 0.12 onwards (though will work for
@@ -27,7 +27,7 @@ func LoadModuleFromFilesystem(fs FS, dir string) (*Module, Diagnostics) {
 	// uses the _old_ HCL implementation so we can deal with some edge-cases
 	// that are not valid in new HCL.
 
-	module, diags := loadModule(fs, dir)
+	module, diags := loadModule(fs, dir, resolvedModuleRefs)
 	if diags.HasErrors() {
 		// Try using the legacy HCL parser and see if we fare better.
 		legacyModule, legacyDiags := loadModuleLegacyHCL(fs, dir)

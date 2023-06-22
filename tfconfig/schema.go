@@ -14,6 +14,10 @@ var rootSchema = &hcl.BodySchema{
 			LabelNames: nil,
 		},
 		{
+			Type:       "locals",
+			LabelNames: nil,
+		},
+		{
 			Type:       "variable",
 			LabelNames: []string{"name"},
 		},
@@ -88,6 +92,9 @@ var outputSchema = &hcl.BodySchema{
 		},
 		{
 			Name: "sensitive",
+		},
+		{
+			Name: "value",
 		},
 	},
 }

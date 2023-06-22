@@ -6,21 +6,94 @@ package tfconfig
 import (
 	"encoding/json"
 	"fmt"
+	"log"
+	"os"
 	"strings"
 
 	"github.com/hashicorp/hcl/v2/hclsyntax"
+	"golang.org/x/exp/slices"
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/gohcl"
 	"github.com/hashicorp/hcl/v2/hclparse"
+	"github.com/zclconf/go-cty/cty"
 	ctyjson "github.com/zclconf/go-cty/cty/json"
 )
 
-func loadModule(fs FS, dir string) (*Module, Diagnostics) {
+const (
+	passOneLoggerPrefix = "PASS-1: "
+	passTwoLoggerPrefix = "PASS-2: "
+)
+
+type ParserContext struct {
+	// Reference to the parent Terraform module
+	Module *Module
+
+	// Reference to the parent Resource block within the module
+	Resource *Resource
+
+	// Reference to the parent ModuleCall block within the module
+	ModuleCall *ModuleCall
+
+	// When parsing block attributes this is the name of the block itself
+	// resource "res" {
+	//   dynamic "block-name" {
+	//     attr = var.value
+	//   }
+	// }
+	BlockName string
+
+	// ForEach stores the collection reference if the parsed block is created by
+	// for_each iterator.
+	ForEach *ResourceAttributeReference
+
+	// Path segment to be pre-pended to all attribute paths
+	PathRoot string
+
+	Logger *log.Logger
+}
+
+func (c ParserContext) Copy() *ParserContext {
+	var forEachReference *ResourceAttributeReference
+	if c.ForEach != nil {
+		forEachReference = &ResourceAttributeReference{
+			Expression:    c.ForEach.Expression,
+			Module:        c.ForEach.Module,
+			ResourceType:  c.ForEach.ResourceType,
+			ResourceName:  c.ForEach.ResourceName,
+			AttributePath: append([]string{}, c.ForEach.AttributePath...),
+		}
+	}
+	return &ParserContext{
+		Module:     c.Module,
+		Resource:   c.Resource,
+		ModuleCall: c.ModuleCall,
+		BlockName:  c.BlockName,
+		ForEach:    forEachReference,
+		PathRoot:   c.PathRoot,
+		Logger:     c.Logger,
+	}
+}
+
+func newLogger(prefix string) *log.Logger {
+	logger := log.New(os.Stdout, "", log.LstdFlags)
+	logger.SetPrefix(prefix)
+	return logger
+}
+
+func loadModule(fs FS, dir string, resolvedModuleRefs *ResolvedModulesSchema) (*Module, Diagnostics) {
 	mod := NewModule(dir)
 	primaryPaths, diags := dirFiles(fs, dir)
 
 	parser := hclparse.NewParser()
+
+	if meta := resolvedModuleRefs.Find(mod.Path); meta != nil {
+		mod.Metadata = &Metadata{
+			Name:    meta.GetNormalizedKey(),
+			Source:  meta.Source,
+			Version: meta.Version,
+		}
+	}
 
 	for _, filename := range primaryPaths {
 		var file *hcl.File
@@ -45,18 +118,75 @@ func loadModule(fs FS, dir string) (*Module, Diagnostics) {
 			continue
 		}
 
-		contentDiags := LoadModuleFromFile(file, mod)
+		contentDiags := LoadModuleFromFile(file, mod, resolvedModuleRefs)
 		diags = append(diags, contentDiags...)
 	}
 
+	// second-pass: resolve remaining references
+	// that could not be evaluated before all files are loaded
+	runSecondPassResolution(mod)
+
 	return mod, diagnosticsHCL(diags)
+}
+
+func runSecondPassResolution(parentModule *Module) {
+	runSecondPassResourceResolution(parentModule, parentModule.ManagedResources)
+	runSecondPassResourceResolution(parentModule, parentModule.DataResources)
+	runSecondPassModuleCallResolution(parentModule)
+	runSecondPassOutputResolution(parentModule)
+}
+
+func runSecondPassOutputResolution(parentModule *Module) {
+	for i := range parentModule.Outputs {
+		if isUnresolvedReference(parentModule.Outputs[i].Value) {
+			parserCtx := &ParserContext{
+				Module: parentModule,
+				Logger: newLogger(passTwoLoggerPrefix),
+			}
+			parseOutputReference(parserCtx, parentModule.Outputs[i].Value.Expression, &parentModule.Outputs[i].Value)
+		}
+	}
+}
+
+func isUnresolvedReference(a AttributeReference) bool {
+	return slices.Contains([]string{"local", "module"}, a.Type())
+}
+
+func runSecondPassResourceResolution(parentModule *Module, resources map[string]*Resource) {
+	for i := range resources {
+		parserCtx := &ParserContext{
+			Module:   parentModule,
+			Resource: resources[i],
+			Logger:   newLogger(passTwoLoggerPrefix),
+		}
+		for qualifiedAttrName, attrValue := range resources[i].Inputs {
+			if isUnresolvedReference(attrValue) {
+				resolveResourceInputReference(parserCtx, qualifiedAttrName, attrValue.RootExpression())
+			}
+		}
+	}
+}
+
+func runSecondPassModuleCallResolution(parentModule *Module) {
+	for i := range parentModule.ModuleCalls {
+		parserCtx := &ParserContext{
+			Module:     parentModule,
+			ModuleCall: parentModule.ModuleCalls[i],
+			Logger:     newLogger(passTwoLoggerPrefix),
+		}
+		for qualifiedAttrName, attrValue := range parentModule.ModuleCalls[i].Inputs {
+			if isUnresolvedReference(attrValue) {
+				resolveModuleCallInputReference(parserCtx, qualifiedAttrName, attrValue.RootExpression())
+			}
+		}
+	}
 }
 
 // LoadModuleFromFile reads given file, interprets it and stores in given Module
 // This is useful for any caller which does tokenization/parsing on its own
 // e.g. because it will reuse these parsed files later for more detailed
 // interpretation.
-func LoadModuleFromFile(file *hcl.File, mod *Module) hcl.Diagnostics {
+func LoadModuleFromFile(file *hcl.File, mod *Module, resolvedModuleRefs *ResolvedModulesSchema) hcl.Diagnostics {
 	var diags hcl.Diagnostics
 	content, _, contentDiags := file.Body.PartialContent(rootSchema)
 	diags = append(diags, contentDiags...)
@@ -105,7 +235,14 @@ func LoadModuleFromFile(file *hcl.File, mod *Module) hcl.Diagnostics {
 					}
 				}
 			}
-
+		case "locals":
+			content, contentDiags := block.Body.JustAttributes()
+			diags = append(diags, contentDiags...)
+			if !contentDiags.HasErrors() {
+				for _, attr := range content {
+					mod.Locals[attr.Name] = attr.Expr
+				}
+			}
 		case "variable":
 			content, _, contentDiags := block.Body.PartialContent(variableSchema)
 			diags = append(diags, contentDiags...)
@@ -212,6 +349,15 @@ func LoadModuleFromFile(file *hcl.File, mod *Module) hcl.Diagnostics {
 				o.Sensitive = sensitive
 			}
 
+			parserCtx := &ParserContext{
+				Module: mod,
+				Logger: newLogger(passOneLoggerPrefix),
+			}
+			if attr, defined := content.Attributes["value"]; defined {
+				o.Value = ResourceAttributeReference{}
+				parseOutputReference(parserCtx, attr.Expr, &o.Value)
+			}
+
 		case "provider":
 
 			content, _, contentDiags := block.Body.PartialContent(providerConfigSchema)
@@ -256,9 +402,10 @@ func LoadModuleFromFile(file *hcl.File, mod *Module) hcl.Diagnostics {
 			name := block.Labels[1]
 
 			r := &Resource{
-				Type: typeName,
-				Name: name,
-				Pos:  sourcePosHCL(block.DefRange),
+				Type:       typeName,
+				Name:       name,
+				Pos:        sourcePosHCL(block.DefRange),
+				References: make(map[string][]AttributeReference),
 			}
 
 			var resourcesMap map[string]*Resource
@@ -326,6 +473,21 @@ func LoadModuleFromFile(file *hcl.File, mod *Module) hcl.Diagnostics {
 				}
 			}
 
+			switch block.Type {
+			case "resource":
+				switch t := block.Body.(type) {
+				case *hclsyntax.Body:
+					r.Inputs = make(map[string]AttributeReference)
+					parserCtx := &ParserContext{
+						Module:   mod,
+						Resource: r,
+						Logger:   newLogger(passOneLoggerPrefix),
+					}
+					parseResourceAttributes(parserCtx, t.Attributes)
+					parseNestedResourceBlocks(parserCtx, t.Blocks)
+				}
+			}
+
 		case "module":
 
 			content, _, contentDiags := block.Body.PartialContent(moduleCallSchema)
@@ -363,6 +525,23 @@ func LoadModuleFromFile(file *hcl.File, mod *Module) hcl.Diagnostics {
 				mc.Version = version
 			}
 
+			// recursively parse local module references
+			if subModPath := resolvedModuleRefs.Get(mc.Source, mc.Version); subModPath != "" {
+				mc.Module, _ = LoadModule(subModPath, resolvedModuleRefs)
+			}
+
+			contentAttrs, contentDiags := block.Body.JustAttributes()
+			diags = append(diags, contentDiags...)
+			mc.Inputs = make(map[string]AttributeReference)
+			parserCtx := &ParserContext{
+				Module:     mod,
+				ModuleCall: mc,
+				Logger:     newLogger(passOneLoggerPrefix),
+			}
+			for _, attr := range contentAttrs {
+				parseModuleCallAttribute(parserCtx, attr)
+			}
+
 		default:
 			// Should never happen because our cases above should be
 			// exhaustive for our schema.
@@ -371,4 +550,310 @@ func LoadModuleFromFile(file *hcl.File, mod *Module) hcl.Diagnostics {
 	}
 
 	return diags
+}
+
+func parseNestedResourceBlocks(parserCtx *ParserContext, blocks hclsyntax.Blocks) {
+	pathRoot := parserCtx.PathRoot
+	for _, block := range blocks {
+		parserCtx = parserCtx.Copy()
+		blockName := block.Type
+		if blockName == "dynamic" {
+			blockName = block.Labels[0]
+			parserCtx.BlockName = blockName
+		} else if blockName == "content" {
+			blockName = "" // ignore this level; defines body for iterators
+		}
+
+		parserCtx.PathRoot = buildPath(pathRoot, blockName)
+		parseResourceAttributes(parserCtx, block.Body.Attributes)
+		parseNestedResourceBlocks(parserCtx, block.Body.Blocks)
+	}
+}
+
+func buildPath(segments ...string) string {
+	return strings.Join(nonEmpty(segments...), ".")
+}
+
+func nonEmpty(segments ...string) []string {
+	nonEmptySegments := make([]string, 0)
+	for _, segment := range segments {
+		if segment != "" {
+			nonEmptySegments = append(nonEmptySegments, segment)
+		}
+	}
+	return nonEmptySegments
+}
+
+func parseResourceAttributes(parserCtx *ParserContext, attrs hclsyntax.Attributes) {
+	// parse for_each first to make it available for resolving further expressions
+	if forEachAttr, ok := attrs["for_each"]; ok {
+		result := ResourceAttributeReference{}
+		parseOutputReference(parserCtx, forEachAttr.Expr, &result) // parse with the old context
+		parserCtx.ForEach = &result
+	}
+	for name, attr := range attrs {
+		if name != "for_each" {
+			parseResourceAttribute(parserCtx, attr)
+		}
+	}
+}
+
+func parseResourceAttribute(parserCtx *ParserContext, attr *hclsyntax.Attribute) {
+	switch attr.Name {
+	case "tags", "count", "depends_on":
+		return // ignore common attributes
+	default:
+		qualifiedAttrName := buildPath(parserCtx.PathRoot, attr.Name)
+		resolveResourceInputReference(parserCtx, qualifiedAttrName, attr.Expr)
+	}
+}
+
+func resolveResourceInputReference(parserCtx *ParserContext, qualifiedAttrName string, expr hcl.Expression) {
+	in := ResourceAttributeReference{}
+	parseOutputReference(parserCtx, expr, &in)
+	parserCtx.Resource.Inputs[qualifiedAttrName] = in
+
+	// resource "res" {
+	//	 attr_1 = var.input_variable (input variable whose resolution is not known at this level - i.e. from user or a higher-level module-call)
+	//	 attr_2 = module.other_mod.out_val (reference to other module's output that has not been resolved yet - i.e. the referenced module has not been parsed yet)
+	//	 attr_3 = other_resource.attribute.path (direct resource reference - other-resource to this-resource mapping)
+	// }
+	if in.ResourceType == "" || in.ResourceName == "" {
+		// unknown reference type or literal
+		return
+	}
+
+	thisResourceReference := ResourceAttributeReference{
+		Module:        parserCtx.Module,
+		ResourceType:  parserCtx.Resource.Type,
+		ResourceName:  parserCtx.Resource.Name,
+		AttributePath: []string{qualifiedAttrName},
+	}
+
+	switch in.ResourceType {
+	case "var":
+		current, ok := parserCtx.Module.Inputs[in.ResourceName]
+		if !ok {
+			current = make(map[string][]AttributeReference)
+			parserCtx.Module.Inputs[in.ResourceName] = current
+		}
+
+		attrPath := strings.Join(in.AttributePath, ".")
+		current[attrPath] = append(current[attrPath], thisResourceReference)
+	case "local", "module":
+		// this may not be available before all module calls get resolved (finish during 2nd pass)
+		parserCtx.Logger.Printf("WARN: unresolved module-output or local-variable reference in resource %s.%s.%s'\n", parserCtx.Resource.Type, parserCtx.Resource.Name, qualifiedAttrName)
+	case "each":
+		parserCtx.Logger.Printf("WARN: unresolved for-each reference in resource %s.%s.%s'\n", parserCtx.Resource.Type, parserCtx.Resource.Name, qualifiedAttrName)
+	default:
+		if ok := parserCtx.Module.AddResourceReference(in, thisResourceReference); ok {
+			parserCtx.Logger.Printf("INFO: resource-to-resource found: %s -> %s\n", in.Attribute(), thisResourceReference.Attribute())
+		} else {
+			parserCtx.Logger.Printf("WARN: resource-to-resource : %s -> %s\n", in.Attribute(), thisResourceReference.Attribute())
+		}
+	}
+}
+
+func parseModuleCallAttributes(parserCtx *ParserContext, attrs hcl.Attributes) {
+	// parse for_each first to make it available for resolving further expressions
+	if forEachAttr, ok := attrs["for_each"]; ok {
+		result := ResourceAttributeReference{}
+		parseOutputReference(parserCtx, forEachAttr.Expr, &result) // parse with the old context
+		parserCtx.ForEach = &result
+	}
+	for name, attr := range attrs {
+		if name != "for_each" {
+			parseModuleCallAttribute(parserCtx, attr)
+		}
+	}
+}
+
+func parseModuleCallAttribute(parserCtx *ParserContext, attr *hcl.Attribute) {
+	switch attr.Name {
+	case "tags", "count", "depends_on":
+		return // ignore common attributes
+	default:
+		resolveModuleCallInputReference(parserCtx, attr.Name, attr.Expr)
+	}
+}
+
+func resolveModuleCallInputReference(parserCtx *ParserContext, qualifiedAttrName string, expr hcl.Expression) {
+	in := ResourceAttributeReference{}
+	parseOutputReference(parserCtx, expr, &in)
+	parserCtx.ModuleCall.Inputs[qualifiedAttrName] = in
+
+	// module "mod" {
+	//	 attr_1 = var.input_variable (input variable whose resolution is not known at this level - i.e. from user or a higher-level module-call)
+	//	 attr_2 = module.other_mod.out_val (reference to other module's output that has not been resolved yet - i.e. the referenced module has not been parsed yet)
+	//	 attr_3 = other_resource.attribute.path (direct resource reference - knowing what attr_3 resolves to inside the called module we can compute resource-to-resource mapping)
+	// }
+	if parserCtx.ModuleCall.Module != nil {
+		if in.ResourceType == "" || in.ResourceName == "" {
+			// unknown reference type, literal or special value (e.g. destroy, each)
+			return
+		}
+
+		resolved := parserCtx.ModuleCall.Module.GetResourceAttributeReferences(qualifiedAttrName) // attr.Name is the input variable's name inside the module
+
+		switch in.ResourceType {
+		case "var": // resolve this variable to the underlying resource in the called sub-module
+			for _, item := range resolved {
+				current, ok := parserCtx.Module.Inputs[in.ResourceName]
+				if !ok {
+					current = make(map[string][]AttributeReference)
+					parserCtx.Module.Inputs[in.ResourceName] = current
+				}
+
+				attrPath := in.MakeRelative(item.RelativePath).Path() // e.g. var.name.all.nested.attributes
+				current[attrPath] = append(current[attrPath], item.ResourceAttributeReference)
+			}
+		case "local", "module":
+			parserCtx.Logger.Printf("WARN: unresolved module-output or local-variable reference in module-call '%s.%s'\n", parserCtx.ModuleCall.Name, qualifiedAttrName)
+		case "each":
+			parserCtx.Logger.Printf("WARN: unresolved for-each reference in module-call '%s.%s'\n", parserCtx.ModuleCall.Name, qualifiedAttrName)
+		default:
+			for _, item := range resolved {
+				relInp := in.MakeRelative(item.RelativePath)
+				if ok := item.ResourceAttributeReference.Module.AddResourceReference(relInp, item.ResourceAttributeReference); ok {
+					parserCtx.Logger.Printf("INFO: resource-to-resource found: %s -> %s\n", relInp.Attribute(), item.ResourceAttributeReference.Attribute())
+				} else {
+					parserCtx.Logger.Printf("WARN: resource-to-resource : %s -> %s\n", relInp.Attribute(), item.ResourceAttributeReference.Attribute())
+				}
+			}
+		}
+	} else {
+		parserCtx.Logger.Printf("WARN: unresolved module-call '%s' ('%s', '%s')\n", parserCtx.ModuleCall.Name, parserCtx.ModuleCall.Source, parserCtx.ModuleCall.Version)
+	}
+}
+
+func parseOutputReference(parserCtx *ParserContext, expr hcl.Expression, out *ResourceAttributeReference) {
+	if expr == nil {
+		return
+	}
+	out.Expression = expr // save the original parsed expression
+	out.Module = parserCtx.Module
+	switch t := expr.(type) {
+	case *hclsyntax.ScopeTraversalExpr:
+		out.ResourceType = t.Traversal.RootName()
+		traversals := t.Traversal
+		if out.ResourceType == "data" {
+			traversals = traversals[1:] // data resources are referenced as data.<type>.<name>.<attribute>
+		}
+		for i := range traversals {
+			switch tr := traversals[i].(type) {
+			case hcl.TraverseAttr:
+				if i == 0 {
+					out.ResourceType = tr.Name // data-resource case
+				} else if i == 1 {
+					switch out.ResourceType {
+					case "local":
+						if val, ok := parserCtx.Module.Locals[tr.Name]; ok {
+							parseOutputReference(parserCtx, val, out)
+							continue
+						}
+					case "module":
+						if submod, ok := parserCtx.Module.ModuleCalls[tr.Name]; ok {
+							relAttrs := []string{}
+							parseAttributes(traversals[2:], &relAttrs)
+							if submod.Module != nil && len(relAttrs) > 0 { // if no rel. attributes; output likely returns an entire resource
+								if resolvedOutput, ok := submod.Module.Outputs[relAttrs[0]]; ok {
+									*out = resolvedOutput.Value
+									out.AttributePath = append(append([]string{}, out.AttributePath...), relAttrs[1:]...) // append rest of the attribute path to the resolved reference
+									return
+								}
+							}
+						}
+					case "each":
+						parseEachAttribute(parserCtx, tr, traversals[2:], out)
+						return
+					case parserCtx.BlockName: // iterator reference in a nested block
+						// like 'each' but for nested blocks
+						// dynamic "constraints" {
+						// 	attr = constraints.value.id
+						// }
+						parseEachAttribute(parserCtx, tr, traversals[2:], out)
+						return
+					}
+					out.ResourceName = tr.Name
+				} else {
+					out.AttributePath = append(out.AttributePath, tr.Name)
+				}
+			}
+		}
+	case *hclsyntax.FunctionCallExpr:
+		switch t.Name {
+		case "lookup":
+			parseOutputReference(parserCtx, t.Args[0], out)
+			parseOutputReference(parserCtx, t.Args[1], out) // the lookup attribute
+		default:
+			parseOutputReference(parserCtx, t.Args[0], out) // only do first arg
+		}
+	case *hclsyntax.SplatExpr:
+		parseOutputReference(parserCtx, t.Source, out)
+		parseOutputReference(parserCtx, t.Each, out)
+	case *hclsyntax.IndexExpr:
+		parseOutputReference(parserCtx, t.Collection, out)
+	case *hclsyntax.RelativeTraversalExpr:
+		parseOutputReference(parserCtx, t.Source, out)
+		parseAttributes(t.Traversal, &out.AttributePath)
+	case *hclsyntax.ConditionalExpr:
+		if parseOutputReference(parserCtx, t.TrueResult, out); out.ResourceType == "" { // do True branch
+			// if not successful above, attempt the same for KeyExpr
+			parseOutputReference(parserCtx, t.FalseResult, out) // if not successful attempt the False branch
+		}
+	case *hclsyntax.ForExpr:
+		// [for KeyVar, ValVar in <CollExpr (e.g. module.attr)> : <ValExpr (e.g. <ValVar>.attr)>]
+		collectionExprRef := ResourceAttributeReference{}
+		if parseOutputReference(parserCtx, t.ValExpr, out); out.ResourceType == t.ValVar {
+			// iterator has a value variable that refers to the CollExpr: [for k, v in module.module_name.ids : v.id]
+			parseOutputReference(parserCtx, t.CollExpr, &collectionExprRef)
+		} else if parseOutputReference(parserCtx, t.KeyExpr, out); out.ResourceType == t.KeyVar {
+			// if not successful above, attempt the same for KeyExpr
+			parseOutputReference(parserCtx, t.CollExpr, &collectionExprRef)
+		}
+
+		// resolve the item expression by appending it's path to the CollExpr: [for k, v in module.module_name.ids : v.id] --> module.module_name.ids
+		// if item expression does not refer to CollExpr; [for k, v in module.module_name.ids : local.vpc_cidr] --> local.vpc_cidr
+		// if out.ResourceName is empty this is probably a collection of literals: [for k, v in module.module_name.ids : "hello"]
+		if collectionExprRef.ResourceName != "" {
+			collectionExprRef.AttributePath = nonEmpty(append(append(collectionExprRef.AttributePath, out.ResourceName), out.AttributePath...)...)
+			*out = collectionExprRef
+		}
+	case *hclsyntax.TemplateExpr:
+		if t.IsStringLiteral() {
+			v, _ := t.Value(nil)
+			out.AttributePath = append(out.AttributePath, v.AsString())
+		}
+	case *hclsyntax.TemplateWrapExpr:
+		parseOutputReference(parserCtx, t.Wrapped, out)
+	case *hclsyntax.TupleConsExpr:
+		if t.Exprs != nil { // empty tuple []
+			parseOutputReference(parserCtx, t.Exprs[0], out) // only do first item in the collection
+		}
+	}
+}
+
+func parseEachAttribute(parserCtx *ParserContext, current hcl.TraverseAttr, remaining hcl.Traversal, out *ResourceAttributeReference) {
+	if parserCtx.ForEach != nil { // has the for_each expression been already resolved
+		switch current.Name {
+		case "value", "key":
+			relAttrs := []string{}
+			parseAttributes(remaining, &relAttrs)
+			*out = *parserCtx.ForEach
+			out.AttributePath = append(append([]string{}, out.AttributePath...), relAttrs...)
+		}
+	}
+}
+
+func parseAttributes(tr hcl.Traversal, out *[]string) {
+	for _, traversal := range tr {
+		switch t := traversal.(type) {
+		case hcl.TraverseAttr:
+			*out = append(*out, t.Name)
+		case hcl.TraverseIndex:
+			if t.Key.Type() == cty.String {
+				*out = append(*out, t.Key.AsString()) // e.g. map key
+			}
+		}
+	}
 }
