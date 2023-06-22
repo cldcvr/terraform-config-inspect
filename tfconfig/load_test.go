@@ -38,7 +38,7 @@ func TestLoadModule(t *testing.T) {
 				t.Fatalf("failed to parse result file: %s", err)
 			}
 
-			gotObj, _ := LoadModule(path)
+			gotObj, _ := LoadModule(path, nil)
 			if gotObj == nil {
 				t.Fatalf("result object is nil; want a real object")
 			}
@@ -86,7 +86,7 @@ func TestLoadModuleFromFilesystem(t *testing.T) {
 				t.Fatalf("failed to parse result file: %s", err)
 			}
 
-			gotObj, _ := LoadModuleFromFilesystem(WrapFS(fs), path)
+			gotObj, _ := LoadModuleFromFilesystem(WrapFS(fs), path, nil)
 			if gotObj == nil {
 				t.Fatalf("result object is nil; want a real object")
 			}

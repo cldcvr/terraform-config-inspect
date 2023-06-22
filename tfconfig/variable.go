@@ -19,3 +19,19 @@ type Variable struct {
 
 	Pos SourcePos `json:"pos"`
 }
+
+func (v Variable) GetName() string {
+	return v.Name
+}
+
+func (v Variable) GetDescription() string {
+	return v.Description
+}
+
+func (v Variable) IsRequired() bool {
+	return v.Required
+}
+
+func (v Variable) IsComputed() bool {
+	return false
+}
