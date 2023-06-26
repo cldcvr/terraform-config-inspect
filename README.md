@@ -7,11 +7,11 @@ to be broadly compatible with modules written for many different versions of
 Terraform.
 
 ```
-$ go get github.com/hashicorp/terraform-config-inspect
+go get github.com/cldcvr/terraform-config-inspect
 ```
 
 ```go
-import "github.com/hashicorp/terraform-config-inspect/tfconfig"
+import "github.com/cldcvr/terraform-config-inspect/tfconfig"
 
 // ...
 
@@ -37,8 +37,9 @@ automatically by the `go get` command above, that allows viewing module
 information in either a Markdown-like format or in JSON format.
 
 ```sh
-$ terraform-config-inspect path/to/module
+terraform-config-inspect path/to/module
 ```
+
 ```markdown
 # Module `path/to/module`
 
@@ -59,8 +60,9 @@ Provider Requirements:
 ```
 
 ```sh
-$ terraform-config-inspect --json path/to/module
+terraform-config-inspect --json path/to/module
 ```
+
 ```json
 {
   "path": "path/to/module",
