@@ -43,9 +43,11 @@ type ParserContext struct {
 	// }
 	BlockName string
 
-	// ForEach stores the collection reference if the parsed block is created by
-	// for_each iterator.
-	ForEach *ResourceAttributeReference
+	// A block can be repeated for each item from a given collection (for_each attribute).
+	// Each item can be referenced inside the block with each.* in case of top level resource or
+	// block-label.* in case of dynamic block.
+	// This structure holds references to accessible iterators by reference name.
+	Iterators map[string]*ResourceAttributeReference
 
 	// Path segment to be pre-pended to all attribute paths
 	PathRoot string
@@ -54,14 +56,14 @@ type ParserContext struct {
 }
 
 func (c ParserContext) Copy() *ParserContext {
-	var forEachReference *ResourceAttributeReference
-	if c.ForEach != nil {
-		forEachReference = &ResourceAttributeReference{
-			Expression:    c.ForEach.Expression,
-			Module:        c.ForEach.Module,
-			ResourceType:  c.ForEach.ResourceType,
-			ResourceName:  c.ForEach.ResourceName,
-			AttributePath: append([]string{}, c.ForEach.AttributePath...),
+	iterators := make(map[string]*ResourceAttributeReference, 0)
+	for k, v := range c.Iterators {
+		iterators[k] = &ResourceAttributeReference{
+			Expression:    v.Expression,
+			Module:        v.Module,
+			ResourceType:  v.ResourceType,
+			ResourceName:  v.ResourceName,
+			AttributePath: append([]string{}, v.AttributePath...),
 		}
 	}
 	return &ParserContext{
@@ -69,10 +71,18 @@ func (c ParserContext) Copy() *ParserContext {
 		Resource:   c.Resource,
 		ModuleCall: c.ModuleCall,
 		BlockName:  c.BlockName,
-		ForEach:    forEachReference,
+		Iterators:  iterators,
 		PathRoot:   c.PathRoot,
 		Logger:     c.Logger,
 	}
+}
+
+func (c *ParserContext) AddIterator(refName string, value ResourceAttributeReference) *ParserContext {
+	if c.Iterators == nil {
+		c.Iterators = make(map[string]*ResourceAttributeReference, 0)
+	}
+	c.Iterators[refName] = &value
+	return c
 }
 
 func newLogger(prefix string) *log.Logger {
@@ -588,8 +598,12 @@ func parseResourceAttributes(parserCtx *ParserContext, attrs hclsyntax.Attribute
 	// parse for_each first to make it available for resolving further expressions
 	if forEachAttr, ok := attrs["for_each"]; ok {
 		result := ResourceAttributeReference{}
-		parseOutputReference(parserCtx, forEachAttr.Expr, &result) // parse with the old context
-		parserCtx.ForEach = &result
+		parseOutputReference(parserCtx, forEachAttr.Expr, &result)
+		refName := parserCtx.BlockName
+		if refName == "" {
+			refName = "each"
+		}
+		parserCtx.AddIterator(refName, result)
 	}
 	for name, attr := range attrs {
 		if name != "for_each" {
@@ -658,8 +672,12 @@ func parseModuleCallAttributes(parserCtx *ParserContext, attrs hcl.Attributes) {
 	// parse for_each first to make it available for resolving further expressions
 	if forEachAttr, ok := attrs["for_each"]; ok {
 		result := ResourceAttributeReference{}
-		parseOutputReference(parserCtx, forEachAttr.Expr, &result) // parse with the old context
-		parserCtx.ForEach = &result
+		parseOutputReference(parserCtx, forEachAttr.Expr, &result)
+		refName := parserCtx.BlockName
+		if refName == "" {
+			refName = "each"
+		}
+		parserCtx.AddIterator(refName, result)
 	}
 	for name, attr := range attrs {
 		if name != "for_each" {
@@ -763,16 +781,13 @@ func parseOutputReference(parserCtx *ParserContext, expr hcl.Expression, out *Re
 								}
 							}
 						}
-					case "each":
-						parseEachAttribute(parserCtx, tr, traversals[2:], out)
-						return
-					case parserCtx.BlockName: // iterator reference in a nested block
-						// like 'each' but for nested blocks
-						// dynamic "constraints" {
-						// 	attr = constraints.value.id
-						// }
-						parseEachAttribute(parserCtx, tr, traversals[2:], out)
-						return
+					case "var":
+						break
+					default:
+						// the resource type may refer to for_each iterator
+						if ok := parseEachAttribute(parserCtx, tr, traversals[2:], out); ok {
+							return
+						}
 					}
 					out.ResourceName = tr.Name
 				} else {
@@ -833,16 +848,18 @@ func parseOutputReference(parserCtx *ParserContext, expr hcl.Expression, out *Re
 	}
 }
 
-func parseEachAttribute(parserCtx *ParserContext, current hcl.TraverseAttr, remaining hcl.Traversal, out *ResourceAttributeReference) {
-	if parserCtx.ForEach != nil { // has the for_each expression been already resolved
+func parseEachAttribute(parserCtx *ParserContext, current hcl.TraverseAttr, remaining hcl.Traversal, out *ResourceAttributeReference) bool {
+	val, found := parserCtx.Iterators[out.ResourceType]
+	if found {
 		switch current.Name {
 		case "value", "key":
 			relAttrs := []string{}
 			parseAttributes(remaining, &relAttrs)
-			*out = *parserCtx.ForEach
+			*out = *val
 			out.AttributePath = append(append([]string{}, out.AttributePath...), relAttrs...)
 		}
 	}
+	return found
 }
 
 func parseAttributes(tr hcl.Traversal, out *[]string) {
