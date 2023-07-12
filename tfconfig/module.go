@@ -184,6 +184,14 @@ func (r ResourceAttributeReference) MakeRelative(relativePath []string) Relative
 	}
 }
 
+// CopyValues copies attribute values from the other instance while keeping the original metadata (i.e. expression and module references)
+func (r *ResourceAttributeReference) CopyValues(other ResourceAttributeReference) *ResourceAttributeReference {
+	r.ResourceType = other.ResourceType
+	r.ResourceName = other.ResourceName
+	r.AttributePath = other.AttributePath
+	return r
+}
+
 // ProviderConfig represents a provider block in the configuration
 type ProviderConfig struct {
 	Name  string `json:"name"`
