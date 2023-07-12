@@ -548,9 +548,7 @@ func LoadModuleFromFile(file *hcl.File, mod *Module, resolvedModuleRefs *Resolve
 				ModuleCall: mc,
 				Logger:     newLogger(passOneLoggerPrefix),
 			}
-			for _, attr := range contentAttrs {
-				parseModuleCallAttribute(parserCtx, attr)
-			}
+			parseModuleCallAttributes(parserCtx, contentAttrs)
 
 		default:
 			// Should never happen because our cases above should be
@@ -604,6 +602,7 @@ func parseResourceAttributes(parserCtx *ParserContext, attrs hclsyntax.Attribute
 			refName = "each"
 		}
 		parserCtx.AddIterator(refName, result)
+		parserCtx.Resource.Inputs[forEachAttr.Name] = result
 	}
 	for name, attr := range attrs {
 		if name != "for_each" {
@@ -613,13 +612,8 @@ func parseResourceAttributes(parserCtx *ParserContext, attrs hclsyntax.Attribute
 }
 
 func parseResourceAttribute(parserCtx *ParserContext, attr *hclsyntax.Attribute) {
-	switch attr.Name {
-	case "tags", "count", "depends_on":
-		return // ignore common attributes
-	default:
-		qualifiedAttrName := buildPath(parserCtx.PathRoot, attr.Name)
-		resolveResourceInputReference(parserCtx, qualifiedAttrName, attr.Expr)
-	}
+	qualifiedAttrName := buildPath(parserCtx.PathRoot, attr.Name)
+	resolveResourceInputReference(parserCtx, qualifiedAttrName, attr.Expr)
 }
 
 func resolveResourceInputReference(parserCtx *ParserContext, qualifiedAttrName string, expr hcl.Expression) {
@@ -678,6 +672,7 @@ func parseModuleCallAttributes(parserCtx *ParserContext, attrs hcl.Attributes) {
 			refName = "each"
 		}
 		parserCtx.AddIterator(refName, result)
+		parserCtx.ModuleCall.Inputs[forEachAttr.Name] = result
 	}
 	for name, attr := range attrs {
 		if name != "for_each" {
@@ -687,12 +682,7 @@ func parseModuleCallAttributes(parserCtx *ParserContext, attrs hcl.Attributes) {
 }
 
 func parseModuleCallAttribute(parserCtx *ParserContext, attr *hcl.Attribute) {
-	switch attr.Name {
-	case "tags", "count", "depends_on":
-		return // ignore common attributes
-	default:
-		resolveModuleCallInputReference(parserCtx, attr.Name, attr.Expr)
-	}
+	resolveModuleCallInputReference(parserCtx, attr.Name, attr.Expr)
 }
 
 func resolveModuleCallInputReference(parserCtx *ParserContext, qualifiedAttrName string, expr hcl.Expression) {
@@ -748,7 +738,9 @@ func parseOutputReference(parserCtx *ParserContext, expr hcl.Expression, out *Re
 	if expr == nil {
 		return
 	}
-	out.Expression = expr // save the original parsed expression
+	if out.Expression == nil {
+		out.Expression = expr // save the original parsed expression
+	}
 	out.Module = parserCtx.Module
 	switch t := expr.(type) {
 	case *hclsyntax.ScopeTraversalExpr:
@@ -775,7 +767,7 @@ func parseOutputReference(parserCtx *ParserContext, expr hcl.Expression, out *Re
 							parseAttributes(traversals[2:], &relAttrs)
 							if submod.Module != nil && len(relAttrs) > 0 { // if no rel. attributes; output likely returns an entire resource
 								if resolvedOutput, ok := submod.Module.Outputs[relAttrs[0]]; ok {
-									*out = resolvedOutput.Value
+									out.CopyValues(resolvedOutput.Value)
 									out.AttributePath = append(append([]string{}, out.AttributePath...), relAttrs[1:]...) // append rest of the attribute path to the resolved reference
 									return
 								}
@@ -832,7 +824,7 @@ func parseOutputReference(parserCtx *ParserContext, expr hcl.Expression, out *Re
 		// if out.ResourceName is empty this is probably a collection of literals: [for k, v in module.module_name.ids : "hello"]
 		if collectionExprRef.ResourceName != "" {
 			collectionExprRef.AttributePath = nonEmpty(append(append(collectionExprRef.AttributePath, out.ResourceName), out.AttributePath...)...)
-			*out = collectionExprRef
+			out.CopyValues(collectionExprRef)
 		}
 	case *hclsyntax.TemplateExpr:
 		if t.IsStringLiteral() {
@@ -855,7 +847,7 @@ func parseEachAttribute(parserCtx *ParserContext, current hcl.TraverseAttr, rema
 		case "value", "key":
 			relAttrs := []string{}
 			parseAttributes(remaining, &relAttrs)
-			*out = *val
+			out.CopyValues(*val)
 			out.AttributePath = append(append([]string{}, out.AttributePath...), relAttrs...)
 		}
 	}
