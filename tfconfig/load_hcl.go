@@ -260,7 +260,7 @@ func LoadModuleFromFile(file *hcl.File, mod *Module, resolvedModuleRefs *Resolve
 			name := block.Labels[0]
 			v := &Variable{
 				Name: name,
-				Pos:  sourcePosHCL(block.DefRange),
+				Pos:  sourceBlockHCL(block),
 			}
 
 			mod.Variables[name] = v
@@ -340,7 +340,7 @@ func LoadModuleFromFile(file *hcl.File, mod *Module, resolvedModuleRefs *Resolve
 			name := block.Labels[0]
 			o := &Output{
 				Name: name,
-				Pos:  sourcePosHCL(block.DefRange),
+				Pos:  sourceBlockHCL(block),
 			}
 
 			mod.Outputs[name] = o
@@ -414,7 +414,7 @@ func LoadModuleFromFile(file *hcl.File, mod *Module, resolvedModuleRefs *Resolve
 			r := &Resource{
 				Type:       typeName,
 				Name:       name,
-				Pos:        sourcePosHCL(block.DefRange),
+				Pos:        sourceBlockHCL(block),
 				References: make(map[string][]AttributeReference),
 			}
 
@@ -506,7 +506,7 @@ func LoadModuleFromFile(file *hcl.File, mod *Module, resolvedModuleRefs *Resolve
 			name := block.Labels[0]
 			mc := &ModuleCall{
 				Name: block.Labels[0],
-				Pos:  sourcePosHCL(block.DefRange),
+				Pos:  sourceBlockHCL(block),
 			}
 
 			// check if this is overriding an existing module
