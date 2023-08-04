@@ -165,6 +165,10 @@ func buildAttributePath(tokens ...string) string {
 	return strings.Join(tokens, AttributePathSeparator)
 }
 
+func (r ResourceAttributeReference) Root() string {
+	return buildAttributePath(r.ResourceType, r.ResourceName)
+}
+
 func (r ResourceAttributeReference) Attribute() string {
 	return buildAttributePath(r.ResourceType, r.Path())
 }

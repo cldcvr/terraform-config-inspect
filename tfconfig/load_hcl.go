@@ -153,7 +153,7 @@ func runSecondPassOutputResolution(parentModule *Module) {
 				Module: parentModule,
 				Logger: newLogger(passTwoLoggerPrefix),
 			}
-			parseOutputReference(parserCtx, parentModule.Outputs[i].Value.Expression, &parentModule.Outputs[i].Value)
+			parseAttributeReference(parserCtx, parentModule.Outputs[i].Value.Expression, &parentModule.Outputs[i].Value)
 		}
 	}
 }
@@ -365,7 +365,9 @@ func LoadModuleFromFile(file *hcl.File, mod *Module, resolvedModuleRefs *Resolve
 			}
 			if attr, defined := content.Attributes["value"]; defined {
 				o.Value = ResourceAttributeReference{}
-				parseOutputReference(parserCtx, attr.Expr, &o.Value)
+				parseAttributeReference(parserCtx, attr.Expr, &o.Value)
+				o.Dependencies = make(map[string]AttributeReference)
+				collectUniqueDependencies(parserCtx, attr.Expr, o.Dependencies)
 			}
 
 		case "provider":
@@ -488,6 +490,7 @@ func LoadModuleFromFile(file *hcl.File, mod *Module, resolvedModuleRefs *Resolve
 				switch t := block.Body.(type) {
 				case *hclsyntax.Body:
 					r.Inputs = make(map[string]AttributeReference)
+					r.Dependencies = make(map[string]AttributeReference)
 					parserCtx := &ParserContext{
 						Module:   mod,
 						Resource: r,
@@ -543,6 +546,7 @@ func LoadModuleFromFile(file *hcl.File, mod *Module, resolvedModuleRefs *Resolve
 			contentAttrs, contentDiags := block.Body.JustAttributes()
 			diags = append(diags, contentDiags...)
 			mc.Inputs = make(map[string]AttributeReference)
+			mc.Dependencies = make(map[string]AttributeReference)
 			parserCtx := &ParserContext{
 				Module:     mod,
 				ModuleCall: mc,
@@ -596,7 +600,7 @@ func parseResourceAttributes(parserCtx *ParserContext, attrs hclsyntax.Attribute
 	// parse for_each first to make it available for resolving further expressions
 	if forEachAttr, ok := attrs["for_each"]; ok {
 		result := ResourceAttributeReference{}
-		parseOutputReference(parserCtx, forEachAttr.Expr, &result)
+		parseAttributeReference(parserCtx, forEachAttr.Expr, &result)
 		refName := parserCtx.BlockName
 		if refName == "" {
 			refName = "each"
@@ -605,6 +609,7 @@ func parseResourceAttributes(parserCtx *ParserContext, attrs hclsyntax.Attribute
 		parserCtx.Resource.Inputs[forEachAttr.Name] = result
 	}
 	for name, attr := range attrs {
+		collectUniqueDependencies(parserCtx, attr.Expr, parserCtx.Resource.Dependencies)
 		if name != "for_each" {
 			parseResourceAttribute(parserCtx, attr)
 		}
@@ -618,7 +623,7 @@ func parseResourceAttribute(parserCtx *ParserContext, attr *hclsyntax.Attribute)
 
 func resolveResourceInputReference(parserCtx *ParserContext, qualifiedAttrName string, expr hcl.Expression) {
 	in := ResourceAttributeReference{}
-	parseOutputReference(parserCtx, expr, &in)
+	parseAttributeReference(parserCtx, expr, &in)
 	parserCtx.Resource.Inputs[qualifiedAttrName] = in
 
 	// resource "res" {
@@ -666,7 +671,7 @@ func parseModuleCallAttributes(parserCtx *ParserContext, attrs hcl.Attributes) {
 	// parse for_each first to make it available for resolving further expressions
 	if forEachAttr, ok := attrs["for_each"]; ok {
 		result := ResourceAttributeReference{}
-		parseOutputReference(parserCtx, forEachAttr.Expr, &result)
+		parseAttributeReference(parserCtx, forEachAttr.Expr, &result)
 		refName := parserCtx.BlockName
 		if refName == "" {
 			refName = "each"
@@ -675,6 +680,7 @@ func parseModuleCallAttributes(parserCtx *ParserContext, attrs hcl.Attributes) {
 		parserCtx.ModuleCall.Inputs[forEachAttr.Name] = result
 	}
 	for name, attr := range attrs {
+		collectUniqueDependencies(parserCtx, attr.Expr, parserCtx.ModuleCall.Dependencies)
 		if name != "for_each" {
 			parseModuleCallAttribute(parserCtx, attr)
 		}
@@ -687,7 +693,7 @@ func parseModuleCallAttribute(parserCtx *ParserContext, attr *hcl.Attribute) {
 
 func resolveModuleCallInputReference(parserCtx *ParserContext, qualifiedAttrName string, expr hcl.Expression) {
 	in := ResourceAttributeReference{}
-	parseOutputReference(parserCtx, expr, &in)
+	parseAttributeReference(parserCtx, expr, &in)
 	parserCtx.ModuleCall.Inputs[qualifiedAttrName] = in
 
 	// module "mod" {
@@ -734,7 +740,43 @@ func resolveModuleCallInputReference(parserCtx *ParserContext, qualifiedAttrName
 	}
 }
 
-func parseOutputReference(parserCtx *ParserContext, expr hcl.Expression, out *ResourceAttributeReference) {
+// Simply gather all unique raw references from the expression to other entities (e.g. variable, module, resource).
+func collectUniqueDependencies(parserCtx *ParserContext, expr hcl.Expression, out map[string]AttributeReference) {
+	if expr == nil {
+		return
+	}
+	for _, traversals := range expr.Variables() {
+		ref := ResourceAttributeReference{
+			Expression:    expr,
+			Module:        parserCtx.Module,
+			ResourceType:  traversals.RootName(),
+			AttributePath: make([]string, 0),
+		}
+		if ref.ResourceType == "data" {
+			traversals = traversals[1:] // data resources are referenced as data.<type>.<name>.<attribute>
+		}
+		for i := range traversals {
+			switch tr := traversals[i].(type) {
+			case hcl.TraverseAttr:
+				if i == 0 {
+					ref.ResourceType = tr.Name // data-resource case
+				} else if i == 1 {
+					ref.ResourceName = tr.Name
+				} else {
+					break // do not include path elements
+				}
+			}
+		}
+		// discard individual iterator references (e.g. each.key.value)
+		// all dependency references should be collected from the parent for_each expression
+		if _, isIterator := parserCtx.Iterators[ref.ResourceType]; !isIterator {
+			out[ref.Root()] = ref
+		}
+	}
+}
+
+// Parse and resolve expression to attribute reference (i.e. to the underlying variable or resource reference).
+func parseAttributeReference(parserCtx *ParserContext, expr hcl.Expression, out *ResourceAttributeReference) {
 	if expr == nil {
 		return
 	}
@@ -758,7 +800,7 @@ func parseOutputReference(parserCtx *ParserContext, expr hcl.Expression, out *Re
 					switch out.ResourceType {
 					case "local":
 						if val, ok := parserCtx.Module.Locals[tr.Name]; ok {
-							parseOutputReference(parserCtx, val, out)
+							parseAttributeReference(parserCtx, val, out)
 							continue
 						}
 					case "module":
@@ -790,33 +832,33 @@ func parseOutputReference(parserCtx *ParserContext, expr hcl.Expression, out *Re
 	case *hclsyntax.FunctionCallExpr:
 		switch t.Name {
 		case "lookup":
-			parseOutputReference(parserCtx, t.Args[0], out)
-			parseOutputReference(parserCtx, t.Args[1], out) // the lookup attribute
+			parseAttributeReference(parserCtx, t.Args[0], out)
+			parseAttributeReference(parserCtx, t.Args[1], out) // the lookup attribute
 		default:
-			parseOutputReference(parserCtx, t.Args[0], out) // only do first arg
+			parseAttributeReference(parserCtx, t.Args[0], out) // only do first arg
 		}
 	case *hclsyntax.SplatExpr:
-		parseOutputReference(parserCtx, t.Source, out)
-		parseOutputReference(parserCtx, t.Each, out)
+		parseAttributeReference(parserCtx, t.Source, out)
+		parseAttributeReference(parserCtx, t.Each, out)
 	case *hclsyntax.IndexExpr:
-		parseOutputReference(parserCtx, t.Collection, out)
+		parseAttributeReference(parserCtx, t.Collection, out)
 	case *hclsyntax.RelativeTraversalExpr:
-		parseOutputReference(parserCtx, t.Source, out)
+		parseAttributeReference(parserCtx, t.Source, out)
 		parseAttributes(t.Traversal, &out.AttributePath)
 	case *hclsyntax.ConditionalExpr:
-		if parseOutputReference(parserCtx, t.TrueResult, out); out.ResourceType == "" { // do True branch
+		if parseAttributeReference(parserCtx, t.TrueResult, out); out.ResourceType == "" { // do True branch
 			// if not successful above, attempt the same for KeyExpr
-			parseOutputReference(parserCtx, t.FalseResult, out) // if not successful attempt the False branch
+			parseAttributeReference(parserCtx, t.FalseResult, out) // if not successful attempt the False branch
 		}
 	case *hclsyntax.ForExpr:
 		// [for KeyVar, ValVar in <CollExpr (e.g. module.attr)> : <ValExpr (e.g. <ValVar>.attr)>]
 		collectionExprRef := ResourceAttributeReference{}
-		if parseOutputReference(parserCtx, t.ValExpr, out); out.ResourceType == t.ValVar {
+		if parseAttributeReference(parserCtx, t.ValExpr, out); out.ResourceType == t.ValVar {
 			// iterator has a value variable that refers to the CollExpr: [for k, v in module.module_name.ids : v.id]
-			parseOutputReference(parserCtx, t.CollExpr, &collectionExprRef)
-		} else if parseOutputReference(parserCtx, t.KeyExpr, out); out.ResourceType == t.KeyVar {
+			parseAttributeReference(parserCtx, t.CollExpr, &collectionExprRef)
+		} else if parseAttributeReference(parserCtx, t.KeyExpr, out); out.ResourceType == t.KeyVar {
 			// if not successful above, attempt the same for KeyExpr
-			parseOutputReference(parserCtx, t.CollExpr, &collectionExprRef)
+			parseAttributeReference(parserCtx, t.CollExpr, &collectionExprRef)
 		}
 
 		// resolve the item expression by appending it's path to the CollExpr: [for k, v in module.module_name.ids : v.id] --> module.module_name.ids
@@ -832,10 +874,10 @@ func parseOutputReference(parserCtx *ParserContext, expr hcl.Expression, out *Re
 			out.AttributePath = append(out.AttributePath, v.AsString())
 		}
 	case *hclsyntax.TemplateWrapExpr:
-		parseOutputReference(parserCtx, t.Wrapped, out)
+		parseAttributeReference(parserCtx, t.Wrapped, out)
 	case *hclsyntax.TupleConsExpr:
 		if t.Exprs != nil { // empty tuple []
-			parseOutputReference(parserCtx, t.Exprs[0], out) // only do first item in the collection
+			parseAttributeReference(parserCtx, t.Exprs[0], out) // only do first item in the collection
 		}
 	}
 }
