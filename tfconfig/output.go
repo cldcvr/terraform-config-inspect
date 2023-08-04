@@ -10,7 +10,13 @@ type Output struct {
 	Value       ResourceAttributeReference `json:"value"`
 	Description string                     `json:"description,omitempty"`
 	Sensitive   bool                       `json:"sensitive,omitempty"`
-	Pos         SourcePos                  `json:"pos"`
+	Pos         SourcePos                  `json:"pos"` // All references (not resolved) to other variables (e.g. modules, variables) grouped by name.
+
+	// This may include variables that themselves do not resolve into attribute value (e.g. if condition).
+	// module "mod" {
+	//	input-name = var.variable_ref != "" ? module.mod.out_ref : other_res.attr
+	// }
+	Dependencies map[string]AttributeReference `json:"dependencies"`
 }
 
 func (v Output) GetName() string {

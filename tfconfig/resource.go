@@ -26,6 +26,13 @@ type Resource struct {
 	// All references to this resource's attributes by other resoures.
 	References map[string][]AttributeReference `json:"references"`
 
+	// All references (not resolved) to other variables (e.g. modules, variables) grouped by name.
+	// This may include variables that themselves do not resolve into attribute value (e.g. if condition).
+	// module "mod" {
+	//	input-name = var.variable_ref != "" ? module.mod.out_ref : other_res.attr
+	// }
+	Dependencies map[string]AttributeReference `json:"dependencies"`
+
 	Pos SourcePos `json:"pos"`
 }
 
