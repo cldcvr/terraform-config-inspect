@@ -249,8 +249,19 @@ func LoadModuleFromFile(file *hcl.File, mod *Module, resolvedModuleRefs *Resolve
 			content, contentDiags := block.Body.JustAttributes()
 			diags = append(diags, contentDiags...)
 			if !contentDiags.HasErrors() {
+				parserCtx := &ParserContext{
+					Module: mod,
+					Logger: newLogger(passOneLoggerPrefix),
+				}
 				for _, attr := range content {
-					mod.Locals[attr.Name] = attr.Expr
+					l := &Local{
+						Name:         attr.Name,
+						Expression:   attr.Expr,
+						Pos:          sourceBlockHCL(block),
+						Dependencies: map[string]AttributeReference{},
+					}
+					collectUniqueDependencies(parserCtx, attr.Expr, l.Dependencies)
+					mod.Locals[attr.Name] = l
 				}
 			}
 		case "variable":
@@ -800,7 +811,7 @@ func parseAttributeReference(parserCtx *ParserContext, expr hcl.Expression, out 
 					switch out.ResourceType {
 					case "local":
 						if val, ok := parserCtx.Module.Locals[tr.Name]; ok {
-							parseAttributeReference(parserCtx, val, out)
+							parseAttributeReference(parserCtx, val.Expression, out)
 							continue
 						}
 					case "module":
