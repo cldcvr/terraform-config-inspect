@@ -27,7 +27,7 @@ type Module struct {
 	// Metadata about this module
 	Metadata *Metadata
 
-	Locals map[string]hcl.Expression
+	Locals map[string]*Local
 
 	Variables map[string]*Variable `json:"variables"`
 	Outputs   map[string]*Output   `json:"outputs"`
@@ -206,7 +206,7 @@ type ProviderConfig struct {
 func NewModule(path string) *Module {
 	return &Module{
 		Path:              path,
-		Locals:            make(map[string]hcl.Expression),
+		Locals:            make(map[string]*Local),
 		Variables:         make(map[string]*Variable),
 		Outputs:           make(map[string]*Output),
 		Inputs:            make(map[string]map[string][]AttributeReference),
