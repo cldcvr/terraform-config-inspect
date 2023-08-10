@@ -376,10 +376,14 @@ func LoadModuleFromFile(file *hcl.File, mod *Module, resolvedModuleRefs *Resolve
 			diags = append(diags, contentDiags...)
 
 			name := block.Labels[0]
+			srcBlkPos := sourceBlockHCL(block)
 			// Even if there isn't an explicit version required, we still
 			// need an entry in our map to signal the unversioned dependency.
 			if _, exists := mod.RequiredProviders[name]; !exists {
-				mod.RequiredProviders[name] = &ProviderRequirement{}
+				mod.RequiredProviders[name] = &ProviderRequirement{
+					ParentPos: nil, // this is a standalone provider configuration
+					Pos:       srcBlkPos,
+				}
 			}
 			if attr, defined := content.Attributes["version"]; defined {
 				var version string
@@ -403,6 +407,7 @@ func LoadModuleFromFile(file *hcl.File, mod *Module, resolvedModuleRefs *Resolve
 			mod.ProviderConfigs[providerKey] = &ProviderConfig{
 				Name:  name,
 				Alias: alias,
+				Pos:   srcBlkPos,
 			}
 
 		case "resource", "data":
