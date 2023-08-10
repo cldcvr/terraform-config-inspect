@@ -23,11 +23,15 @@ type ProviderRequirement struct {
 	Source               string        `json:"source,omitempty"`
 	VersionConstraints   []string      `json:"version_constraints,omitempty"`
 	ConfigurationAliases []ProviderRef `json:"aliases,omitempty"`
+
+	ParentPos *SourcePos `json:"parent_pos"`
+	Pos       SourcePos  `json:"pos"`
 }
 
 func decodeRequiredProvidersBlock(block *hcl.Block) (map[string]*ProviderRequirement, hcl.Diagnostics) {
 	attrs, diags := block.Body.JustAttributes()
 	reqs := make(map[string]*ProviderRequirement)
+	srcBlkPos := sourceBlockHCL(block)
 	for name, attr := range attrs {
 		// Look for a legacy version in the attribute first
 		if expr, err := attr.Expr.Value(nil); err == nil && expr.Type().IsPrimitiveType() {
@@ -37,6 +41,8 @@ func decodeRequiredProvidersBlock(block *hcl.Block) (map[string]*ProviderRequire
 			if !valDiags.HasErrors() {
 				reqs[name] = &ProviderRequirement{
 					VersionConstraints: []string{version},
+					ParentPos:          &srcBlkPos,
+					Pos:                sourcePosHCL(attr.Expr.Range()),
 				}
 			}
 			continue
@@ -55,6 +61,8 @@ func decodeRequiredProvidersBlock(block *hcl.Block) (map[string]*ProviderRequire
 
 		var pr ProviderRequirement
 
+		pr.ParentPos = &srcBlkPos
+		pr.Pos = sourcePosHCL(attr.Expr.Range())
 		for _, kv := range kvs {
 			key, keyDiags := kv.Key.Value(nil)
 			if keyDiags.HasErrors() {

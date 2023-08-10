@@ -200,6 +200,8 @@ func (r *ResourceAttributeReference) CopyValues(other ResourceAttributeReference
 type ProviderConfig struct {
 	Name  string `json:"name"`
 	Alias string `json:"alias,omitempty"`
+
+	Pos SourcePos `json:"pos"`
 }
 
 // NewModule creates new Module representing Terraform module at the given path
