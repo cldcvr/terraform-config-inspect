@@ -81,3 +81,15 @@ func resourceTypeDefaultProviderName(typeName string) string {
 	}
 	return typeName
 }
+
+func (b Resource) GetDependencies() map[string]AttributeReference {
+	return b.Dependencies
+}
+
+func (b Resource) GetPos() SourcePos {
+	return b.Pos
+}
+
+func (b Resource) GeProviderName() string {
+	return b.Provider.Name
+}

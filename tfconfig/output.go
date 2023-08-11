@@ -34,3 +34,11 @@ func (v Output) IsRequired() bool {
 func (v Output) IsComputed() bool {
 	return true
 }
+
+func (b Output) GetDependencies() map[string]AttributeReference {
+	return b.Dependencies
+}
+
+func (b Output) GetPos() SourcePos {
+	return b.Pos
+}

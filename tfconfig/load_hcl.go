@@ -253,11 +253,13 @@ func LoadModuleFromFile(file *hcl.File, mod *Module, resolvedModuleRefs *Resolve
 					Module: mod,
 					Logger: newLogger(passOneLoggerPrefix),
 				}
+				parentPos := sourceBlockHCL(block)
 				for _, attr := range content {
 					l := &Local{
 						Name:         attr.Name,
 						Expression:   attr.Expr,
-						Pos:          sourceBlockHCL(block),
+						Pos:          sourcePosHCL(attr.Range),
+						ParentPos:    parentPos,
 						Dependencies: map[string]AttributeReference{},
 					}
 					collectUniqueDependencies(parserCtx, attr.Expr, l.Dependencies)

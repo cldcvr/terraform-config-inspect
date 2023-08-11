@@ -24,8 +24,16 @@ type ProviderRequirement struct {
 	VersionConstraints   []string      `json:"version_constraints,omitempty"`
 	ConfigurationAliases []ProviderRef `json:"aliases,omitempty"`
 
-	ParentPos *SourcePos `json:"parent_pos"`
+	ParentPos *SourcePos `json:"parent_pos"` // optional
 	Pos       SourcePos  `json:"pos"`
+}
+
+func (b ProviderRequirement) GetPos() SourcePos {
+	return b.Pos
+}
+
+func (b ProviderRequirement) GetParentPos() *SourcePos {
+	return b.ParentPos
 }
 
 func decodeRequiredProvidersBlock(block *hcl.Block) (map[string]*ProviderRequirement, hcl.Diagnostics) {

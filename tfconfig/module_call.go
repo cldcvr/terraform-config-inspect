@@ -28,3 +28,11 @@ type ModuleCall struct {
 
 	Module *Module `json:"-"`
 }
+
+func (b ModuleCall) GetDependencies() map[string]AttributeReference {
+	return b.Dependencies
+}
+
+func (b ModuleCall) GetPos() SourcePos {
+	return b.Pos
+}
