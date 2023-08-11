@@ -35,3 +35,7 @@ func (v Variable) IsRequired() bool {
 func (v Variable) IsComputed() bool {
 	return false
 }
+
+func (v Variable) GetPos() SourcePos {
+	return v.Pos
+}
