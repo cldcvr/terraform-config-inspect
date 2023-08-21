@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"strings"
 
 	"github.com/hashicorp/hcl/v2/hclsyntax"
@@ -86,8 +85,7 @@ func (c *ParserContext) AddIterator(refName string, value ResourceAttributeRefer
 }
 
 func newLogger(prefix string) *log.Logger {
-	logger := log.New(os.Stdout, "", log.LstdFlags)
-	logger.SetPrefix(prefix)
+	logger := log.New(log.Default().Writer(), prefix, log.Default().Flags())
 	return logger
 }
 
